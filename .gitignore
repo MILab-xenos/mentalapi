@@ -1,0 +1,10 @@
+backups/
+output/
+__pycache__/
+.ipynb_checkpoints/
+.codegraph/
+.omo/
+.trae/
+*.pyc
+*.log
+.DS_Store

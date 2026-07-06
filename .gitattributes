@@ -1,0 +1,2 @@
+ckpts/*.pt filter=lfs diff=lfs merge=lfs -text
+ckpts/*.pth filter=lfs diff=lfs merge=lfs -text

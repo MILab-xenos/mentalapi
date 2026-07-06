@@ -1,0 +1,6 @@
+[submodule "mentalts"]
+	path = mentalts
+	url = https://github.com/MILab-xenos/mentalts.git
+[submodule "pyfeat"]
+	path = pyfeat
+	url = https://github.com/cosanlab/feat.git
