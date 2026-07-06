@@ -7,4 +7,7 @@ __pycache__/
 .trae/
 *.pyc
 *.log
+*.prof
 .DS_Store
+build/
+*.egg-info/
