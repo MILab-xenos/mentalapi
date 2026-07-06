@@ -76,21 +76,24 @@ def load_audio_models():
             del sys.modules[key]
 
 def load_ts_models():
-    """Pre-load all 4 best-per-task TS classification models using infer.py patterns."""
+    """Pre-load best-per-task TS classification models, selected by macro_f1 from CSV."""
+    import pandas as pd
     import infer as ts_infer
 
     ts_ckpt_base = os.path.join(os.path.dirname(__file__), 'mentalts', 'checkpoints')
+    csv_path = os.path.join(os.path.dirname(__file__), 'mentalts', 'classification_summary.csv')
 
-    BEST_CKPTS = {
-        'depression': 'classification_dep_cls_wobg_clip_seq256_enc64_lr0.0002_Informer_Mental_ftwobg_clip_sl256_ll48_pl0_dm128_nh8_el3_dl1_df256_expand2_dc4_fc1_ebtimeF_dtTrue_Exp_seq256_wobg_clip_lr0.0002_0',
-        'anxious':   'classification_anx_cls_wobg_clip_seq256_enc64_lr0.0002_Reformer_Mental_ftwobg_clip_sl256_ll48_pl0_dm128_nh8_el3_dl1_df256_expand2_dc4_fc1_ebtimeF_dtTrue_Exp_seq256_wobg_clip_lr0.0002_0',
-        'zisha':     'classification_sui_cls_wobg_clip_seq256_enc64_lr0.0002_FiLM_Mental_ftwobg_clip_sl256_ll48_pl0_dm128_nh8_el3_dl1_df256_expand2_dc4_fc1_ebtimeF_dtTrue_Exp_seq256_wobg_clip_lr0.0002_0',
-        'overall':   'classification_ovr_cls_wobg_clip_seq256_enc64_lr0.0002_DLinear_Mental_ftwobg_clip_sl256_ll48_pl0_dm128_nh8_el3_dl1_df256_expand2_dc4_fc1_ebtimeF_dtTrue_Exp_seq256_wobg_clip_lr0.0002_0',
-    }
+    df = pd.read_csv(csv_path)
+    # Filter to wobg_clip features (matching our video pipeline output)
+    df = df[df['Setting'].str.contains('wobg_clip', na=False)]
+    best_rows = df.loc[df.groupby('Target')['macro_f1'].idxmax()]
 
-    for task_name, ckpt_rel in BEST_CKPTS.items():
-        ckpt_dir = os.path.join(ts_ckpt_base, ckpt_rel)
-        print(f"-> 加载时间序列模型 [{task_name}]: {ckpt_rel[:50]}...")
+    TARGET_MAP = {'anxiety': 'anxious', 'depression': 'depression', 'suiside': 'zisha', 'overall': 'overall'}
+
+    for _, row in best_rows.iterrows():
+        task_name = TARGET_MAP.get(row['Target'], row['Target'])
+        ckpt_dir = os.path.join(ts_ckpt_base, row['Setting'])
+        print(f"-> 加载时间序列模型 [{task_name}] {row['Model']} (f1={row['macro_f1']:.4f})")
         model, args = ts_infer.load_model(ckpt_dir, DEVICE)
         GLOBAL_MODELS['ts_models'][task_name] = (model, args)
     print(f"-> 时间序列模型加载完成 ({len(GLOBAL_MODELS['ts_models'])} 个)")
