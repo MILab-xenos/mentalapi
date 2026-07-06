@@ -164,12 +164,32 @@ def predict_audio(task_name, mel_png_path):
         "all_class_probabilities": [round(p, 4) for p in all_probs]
     }
 
+def _load_viapi_module():
+    """自动选择视频处理后端：
+    优先 viapi.py (PyNvCodec GPU 硬解)，不可用时回退 viapi-pyav.py (PyAV CPU 解码)。
+    """
+    try:
+        import PyNvCodec  # noqa: F401  探测 NVDEC 硬解是否可用
+        import viapi as vi
+        print("-> 视频后端: viapi (PyNvCodec GPU 硬解)")
+        return vi
+    except Exception as e:
+        import importlib.util
+        pyav_path = os.path.join(os.path.dirname(__file__), 'viapi-pyav.py')
+        spec = importlib.util.spec_from_file_location("viapi_pyav", pyav_path)
+        vi = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(vi)
+        print(f"-> 视频后端: viapi-pyav (PyAV CPU 解码, PyNvCodec 不可用: {type(e).__name__})")
+        return vi
+
 def get_video_features(video_path, case_id, tmpdir, target_frames=512):
-    from viapi import (
-        GLOBAL_MODELS as VI_GLOBAL_MODELS,
-        CLIP_MEAN, CLIP_STD, DINO_MEAN, DINO_STD,
-        process_video_pipeline, device, GPU_ID
-    )
+    vi = _load_viapi_module()
+    VI_GLOBAL_MODELS = vi.GLOBAL_MODELS
+    CLIP_MEAN, CLIP_STD = vi.CLIP_MEAN, vi.CLIP_STD
+    DINO_MEAN, DINO_STD = vi.DINO_MEAN, vi.DINO_STD
+    process_video_pipeline = vi.process_video_pipeline
+    device = vi.device
+    GPU_ID = vi.GPU_ID
 
     torch.cuda.set_device(GPU_ID)
 
