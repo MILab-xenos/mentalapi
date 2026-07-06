@@ -1,8 +1,10 @@
 import os
 import sys
 import json
+import time
 import tempfile
 import subprocess
+import importlib.util
 import torch
 import numpy as np
 import httpx
@@ -107,6 +109,8 @@ async def lifespan(app: FastAPI):
     load_audio_models()
     print("-> 加载时间序列分类模型")
     load_ts_models()
+    print("-> 探测并选择最快的视频解码后端")
+    _select_video_backend()
     print("服务准备就绪！")
     yield
     GLOBAL_MODELS.clear()
@@ -164,23 +168,97 @@ def predict_audio(task_name, mel_png_path):
         "all_class_probabilities": [round(p, 4) for p in all_probs]
     }
 
-def _load_viapi_module():
-    """自动选择视频处理后端：
-    优先 viapi.py (PyNvCodec GPU 硬解)，不可用时回退 viapi-pyav.py (PyAV CPU 解码)。
-    """
-    try:
-        import PyNvCodec  # noqa: F401  探测 NVDEC 硬解是否可用
+# 视频后端候选：(名称, 模块文件, 说明)。viapi.py 用包名导入，其余按文件加载。
+VIDEO_BACKENDS = [
+    ("pyavgpu", "viapi-pyavgpu.py", "PyAV NVDEC GPU 硬解"),
+    ("decord", "viapi-decord.py", "decord NVDEC GPU 硬解"),
+    ("pyav", "viapi-pyav.py", "PyAV CPU 软解"),
+]
+
+# 选定的视频后端模块 (首次调用时探测 + 测速后缓存)
+_SELECTED_VI = None
+
+
+def _import_backend(name, filename):
+    """按文件加载一个视频后端模块。viapi.py (PyNvCodec) 走包导入并先探测依赖。"""
+    if name == "pynvcodec":
+        import PyNvCodec  # noqa: F401  探测 NVDEC 硬解依赖是否可用
         import viapi as vi
-        print("-> 视频后端: viapi (PyNvCodec GPU 硬解)")
         return vi
-    except Exception as e:
-        import importlib.util
-        pyav_path = os.path.join(os.path.dirname(__file__), 'viapi-pyav.py')
-        spec = importlib.util.spec_from_file_location("viapi_pyav", pyav_path)
-        vi = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(vi)
-        print(f"-> 视频后端: viapi-pyav (PyAV CPU 解码, PyNvCodec 不可用: {type(e).__name__})")
+    path = os.path.join(os.path.dirname(__file__), filename)
+    mod_name = "viapi_" + name
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    vi = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vi)
+    return vi
+
+
+def _make_probe_clip(tmpdir):
+    """生成一个短测试视频用于后端测速 (720p/60帧)。失败返回 None。"""
+    clip_path = os.path.join(tmpdir, "backend_probe.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-f", "lavfi",
+        "-i", "testsrc=duration=2:size=1280x720:rate=30",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", clip_path,
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return clip_path if proc.returncode == 0 and os.path.exists(clip_path) else None
+
+
+def _benchmark_backend(vi, clip_path):
+    """对一个后端的解码器做一次解码计时。返回耗时(秒)，失败返回 None。"""
+    try:
+        gpu_id = getattr(vi, "GPU_ID", 0)
+        dec = vi.CpuVideoDecoder(clip_path, gpu_id)
+        t = time.time()
+        n = 0
+        for _ in dec.frames():
+            n += 1
+        if n == 0:
+            return None
+        return time.time() - t
+    except Exception:
+        return None
+
+
+def _select_video_backend():
+    """探测三种后端哪些能用，逐个测速，选最快的作为后端 (结果缓存)。"""
+    global _SELECTED_VI
+    if _SELECTED_VI is not None:
+        return _SELECTED_VI
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clip_path = _make_probe_clip(tmpdir)
+
+        results = []  # (name, desc, vi, elapsed)
+        for name, filename, desc in VIDEO_BACKENDS:
+            try:
+                vi = _import_backend(name, filename)
+            except Exception as e:
+                print(f"-> 后端 [{name}] 不可用 (导入失败: {type(e).__name__}: {e})")
+                continue
+
+            elapsed = _benchmark_backend(vi, clip_path) if clip_path else None
+            if elapsed is None:
+                print(f"-> 后端 [{name}] 可导入但解码测试失败，跳过")
+                continue
+            print(f"-> 后端 [{name}] ({desc}) 解码测速: {elapsed:.3f}s")
+            results.append((name, desc, vi, elapsed))
+
+        if not results:
+            raise RuntimeError("没有可用的视频解码后端 (pyavgpu/decord/pyav 均不可用)")
+
+        # 选最快
+        results.sort(key=lambda r: r[3])
+        name, desc, vi, elapsed = results[0]
+        print(f"=> 选定视频后端: [{name}] ({desc})，解码耗时 {elapsed:.3f}s 最快")
+        _SELECTED_VI = vi
         return vi
+
+
+def _load_viapi_module():
+    """返回选定的视频处理后端 (首次运行时测速选最快，之后复用)。"""
+    return _select_video_backend()
 
 def get_video_features(video_path, case_id, tmpdir, target_frames=512):
     vi = _load_viapi_module()
